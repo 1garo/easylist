@@ -2,11 +2,13 @@ package routes
 
 import (
 	"database/sql"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
 )
 
 type ListRequest struct {
@@ -14,7 +16,7 @@ type ListRequest struct {
 }
 
 type ListItems struct {
-	Id   string `json:"item_id"`
+	Id   int16  `json:"item_id"`
 	Name string `json:"name"`
 }
 type ListResponse struct {
@@ -33,9 +35,10 @@ func Setup(e *echo.Echo, db *sql.DB) {
 			return next(c)
 		}
 	})
+	e.Use(middleware.Logger())
 
 	e.GET("/lists", func(c echo.Context) error {
-		l := c.Logger()
+		l := slog.Default()
 		db := c.Get("db").(*sql.DB) // retrieve it
 		rows, err := db.Query(`
 			select 
@@ -44,12 +47,12 @@ func Setup(e *echo.Echo, db *sql.DB) {
 				l.created_at, 
 				li.id AS item_id,
 				li.item_name
-			from list l
-			left join list_items li where li.list_id = l.list_id 
+			FROM list l
+			LEFT JOIN list_items li ON li.list_id = l.list_id 
 			ORDER BY l.created_at
 			`)
 		if err != nil {
-			l.Error(err)
+			l.Error("", "err", err)
 			return echo.NewHTTPError(http.StatusBadRequest, "provide a valid input")
 		}
 		defer rows.Close()
@@ -58,19 +61,28 @@ func Setup(e *echo.Echo, db *sql.DB) {
 		for rows.Next() {
 			var (
 				list     ListResponse
-				listItem ListItems
+				itemId   sql.NullInt16
+				itemName sql.NullString
 			)
-			if err := rows.Scan(&list.ListId, &list.Name, &list.CreatedAt, &listItem.Id, &listItem.Name); err != nil {
+			if err := rows.Scan(&list.ListId, &list.Name, &list.CreatedAt, &itemId, &itemName); err != nil {
 				return err
 			}
 
+			lists[list.ListId] = &list
+
+			hasItems := itemId.Valid && itemName.Valid
+			if !hasItems {
+				l.Info("not item found", "list", list.Name)
+				continue
+			}
+
+			items := ListItems{
+				Id:   itemId.Int16,
+				Name: itemName.String,
+			}
+
 			if _, exists := lists[list.ListId]; exists {
-				l.Info(listItem)
-				l.Info(lists[list.ListId])
-				lists[list.ListId].Items = append(lists[list.ListId].Items, listItem)
-				l.Info(lists[list.ListId])
-			} else {
-				lists[list.ListId] = &list
+				lists[list.ListId].Items = append(lists[list.ListId].Items, items)
 			}
 		}
 
